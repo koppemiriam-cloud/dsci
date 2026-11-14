@@ -15,12 +15,6 @@ from scipy.ndimage import binary_closing, binary_fill_holes
 
 import object_extraction as extraction
 
-# Frühere Kaggle-Pfade (lokal nicht benötigt):
-# INPUT_PATH = Path('/kaggle/input/datasets/miriamkoppe/platinen')
-# OUTPUT_PATH = Path('/kaggle/working/Ausschnitte')
-# EXTRACTION_MODULE_PATH = Path('/kaggle/input/datasets/toedtlifhsg/object-extraction')
-
-
 @dataclass(frozen=True)
 class Config:
     """Erkennung für eine einzelne Platine auf hellem Hintergrund pro Foto."""

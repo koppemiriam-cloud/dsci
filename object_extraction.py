@@ -86,9 +86,7 @@ def fill_borders(im,value_to_fill = False,fraction_of_rows_to_remove=0.0, fracti
 
 
 def ask_path_creation(path,yes_to_all=False):
-    """
-    Fragt den Nutzer, ob das Verzeichnis <path> erstellt werden darf (falls es nicht schon existiert).
-    """
+
     if not os.path.exists(path):
             logger.info(f"Der Pfad {path} konnte nicht gefunden werden. ")
             if not yes_to_all:

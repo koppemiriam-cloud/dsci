@@ -13,7 +13,6 @@ DATA_DIR = 'dataset'
 print("Lade Datensatz...")
 
 # 2. Trainings- und Validierungsdaten automatisch aus den Ordnern laden
-# (Keras liest die Ordner 'good' und 'bad' automatisch als Klassen ein)
 train_dataset = image_dataset_from_directory(
     DATA_DIR,
     validation_split=0.2,
@@ -113,7 +112,7 @@ y = np.asarray(list(val_dataset.unbatch().map(lambda bild, label: label)))
 yhat = model.predict(val_dataset)
 yhatnum = yhat.argmax(axis=1)
 
-# In Klassennamen ('Bad', 'Good') übersetzen
+# In Klassennamen ('Bad_Platine', 'Good_Platine') übersetzen
 y_str = np.array(class_names)[y]
 yhat_str = np.array(class_names)[yhatnum]
 

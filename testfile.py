@@ -21,8 +21,8 @@ input_arr = np.array([input_arr])  # Shape wird zu (1, 224, 224, 3)
 predictions = model.predict(input_arr)
 
 # 6. Ergebnis interpretieren
-# (Je nach Ordnerstruktur sortiert TensorFlow die Klassen alphabetisch: z.B. ['Bad', 'Good'])
-class_names = ['Bad', 'Good']
+# (Je nach Ordnerstruktur sortiert TensorFlow die Klassen alphabetisch: z.B. ['Bad_Platine', 'Good_Platine'])
+class_names = ['Bad_Platine', 'Good_Platine']
 predicted_index = predictions.argmax(axis=1)[0]
 confidence = float(np.max(predictions)) * 100
 
