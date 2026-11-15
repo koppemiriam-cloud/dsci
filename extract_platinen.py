@@ -11,9 +11,6 @@ import cv2
 from matplotlib.patches import Rectangle
 import numpy as np
 from PIL import Image, ImageOps
-from scipy.ndimage import binary_closing, binary_fill_holes
-
-import object_extraction as extraction
 
 @dataclass(frozen=True)
 class Config:
@@ -27,10 +24,25 @@ class Config:
     random_seed: int = 0
     show_preview: bool = True
     detection_max_side: int = 1600
-    value_threshold: float = -190.0  # Vordergrund dunkler als 190 (HSV, 0..255)
+    green_hsv_lower: tuple[int, int, int] = (25, 25, 20)
+    green_hsv_upper: tuple[int, int, int] = (95, 255, 255)
     closing_radius: int = 5  # Pixel der verkleinerten Erkennungskopie
     crop_padding: int = 5  # Pixel im Originalbild
     min_object_fraction: float = 0.01
+
+    def __post_init__(self) -> None:
+        if self.detection_max_side < 1:
+            raise ValueError('detection_max_side muss mindestens 1 sein.')
+        if self.closing_radius < 0 or self.crop_padding < 0:
+            raise ValueError('closing_radius und crop_padding dürfen nicht negativ sein.')
+        if not 0 < self.min_object_fraction <= 1:
+            raise ValueError('min_object_fraction muss im Bereich (0, 1] liegen.')
+        if len(self.green_hsv_lower) != 3 or len(self.green_hsv_upper) != 3:
+            raise ValueError('HSV-Grenzen müssen jeweils drei Werte enthalten.')
+        for lower, upper, maximum in zip(self.green_hsv_lower, self.green_hsv_upper,
+                                         (179, 255, 255)):
+            if not 0 <= lower <= upper <= maximum:
+                raise ValueError('Ungültige HSV-Grenzen (H: 0..179, S/V: 0..255).')
 
 
 def find_images(config: Config) -> list[Path]:
@@ -66,7 +78,7 @@ def preview_image(image: np.ndarray, mask: np.ndarray, bounds: tuple[int, int, i
         (left, top), right - left, bottom - top,
         fill=False, edgecolor='red', linewidth=2,
     ))
-    axes[0].set_title('Recognized Area')
+    axes[0].set_title('Erkannte Platine')
     axes[1].imshow(mask, cmap='gray')
     axes[1].set_title('Maske')
     axes[2].imshow(crop)
@@ -84,7 +96,16 @@ def detect_board(
     config: Config
 ) -> tuple[np.ndarray, tuple[int, int, int, int]]:
 
+    """Grüne Aussenkontur suchen; alle eingeschlossenen Bauteile erhalten.
+
+    Die Maske füllt absichtlich auch Bohrungen innerhalb der Platine. Dunkle
+    Pixel ausserhalb der Kontur werden nicht ergänzt: Dort liegen oft Schatten.
+    """
+    if image.ndim != 3 or image.shape[2] != 3 or image.dtype != np.uint8:
+        raise ValueError('Erwarte ein RGB-Bild mit drei Kanälen und dtype uint8.')
     height, width = image.shape[:2]
+    if height == 0 or width == 0:
+        raise ValueError('Das Bild darf nicht leer sein.')
 
     # Bild für die Erkennung verkleinern
     scale = min(
@@ -109,28 +130,20 @@ def detect_board(
         cv2.COLOR_RGB2HSV
     )
 
-    # Präzisere HSV-Grenzwerte (verhindert, dass der weiße Hintergrund/Schatten fälschlicherweise erfasst wird)
-    lower_green = np.array([25, 25, 20])
-    upper_green = np.array([95, 255, 255])
-
     green_mask = cv2.inRange(
-        hsv,
-        lower_green,
-        upper_green
+        hsv, np.array(config.green_hsv_lower, dtype=np.uint8),
+        np.array(config.green_hsv_upper, dtype=np.uint8),
     )
 
-    # Moderater Kernel, um Lücken zu schliessen, ohne den Hintergrund zu berühren
-    kernel = cv2.getStructuringElement(
-        cv2.MORPH_ELLIPSE,
-        (15, 15)
-    )
-
-    green_mask = cv2.morphologyEx(
-        green_mask,
-        cv2.MORPH_CLOSE,
-        kernel,
-        iterations=2
-    )
+    # Rand auffüllen, damit Closing auch bei angeschnittenen Platinen stabil ist.
+    radius = config.closing_radius
+    if radius:
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,
+                                           (2 * radius + 1, 2 * radius + 1))
+        padded = cv2.copyMakeBorder(green_mask, radius, radius, radius, radius,
+                                    cv2.BORDER_CONSTANT, value=0)
+        green_mask = cv2.morphologyEx(padded, cv2.MORPH_CLOSE, kernel)
+        green_mask = green_mask[radius:-radius, radius:-radius]
 
     # Alle Konturen finden
     contours, _ = cv2.findContours(
@@ -147,34 +160,21 @@ def detect_board(
     # Grösste Kontur wählen (die eigentliche Platine)
     largest_contour = max(contours, key=cv2.contourArea)
 
-    if cv2.contourArea(largest_contour) < 50:
+    if cv2.contourArea(largest_contour) < config.min_object_fraction * green_mask.size:
         raise ValueError(
             "Die erkannte Platinenfläche ist zu klein."
         )
 
-    # Maske exakt entlang der Platinen-Kontur zeichnen
-    mask_small = np.zeros(
-        detection_image.shape[:2],
-        dtype=np.uint8
-    )
-
-    cv2.drawContours(
-        mask_small,
-        [largest_contour],
-        -1,
-        255,
-        thickness=cv2.FILLED
-    )
-
-    # Innere Löcher (schwarze Gehäuse, Chips) füllen, damit sie im Crop erhalten bleiben
-    mask_small = binary_fill_holes(mask_small).astype(np.uint8) * 255
-
-    # Äussere Platinenmaske auf Originalauflösung skalieren
-    board_mask = cv2.resize(
-        mask_small,
-        (width, height),
-        interpolation=cv2.INTER_NEAREST
-    ) > 0
+    # Konturkoordinaten ins Original übertragen und dort füllen. So entstehen
+    # keine grossen Pixelblöcke durch Nearest-Neighbour-Skalierung der Maske.
+    contour = largest_contour.astype(np.float64)
+    contour[:, :, 0] = (contour[:, :, 0] + 0.5) * width / detection_size[0] - 0.5
+    contour[:, :, 1] = (contour[:, :, 1] + 0.5) * height / detection_size[1] - 0.5
+    contour = np.rint(contour).astype(np.int32)
+    board_mask = np.zeros((height, width), dtype=np.uint8)
+    # FILLED erhält auch schwarze Chips und helle Aufdrucke innerhalb der Kontur.
+    cv2.drawContours(board_mask, [contour], -1, 1, thickness=cv2.FILLED)
+    board_mask = board_mask.astype(bool)
 
     # Begrenzungsrahmen anhand der Platine bestimmen
     rows, cols = np.where(board_mask)
@@ -192,10 +192,7 @@ def detect_board(
 
     bounds = (top, left, bottom, right)
 
-    # Die saubere Platinenmaske als finale Anzeige-/Speichermaske nutzen
-    display_mask = board_mask
-
-    return display_mask, bounds
+    return board_mask, bounds
 
 def process_image(image_path: Path, config: Config, show_preview: bool = False) -> Path:
     # EXIF-Ausrichtung berücksichtigen, damit Hochformat nicht seitlich gespeichert wird.
@@ -206,8 +203,10 @@ def process_image(image_path: Path, config: Config, show_preview: bool = False) 
     crop = np.dstack((image[top:bottom, left:right],
                       mask[top:bottom, left:right].astype(np.uint8) * 255))
     output_path = config.output_path / f'{image_path.stem}_crop.png'
-    Image.fromarray(crop).save(output_path)
-    Image.fromarray(crop).save(config.output_path / f'{image_path.stem}_freigestellt.png')
+    config.output_path.mkdir(parents=True, exist_ok=True)
+    result = Image.fromarray(crop)
+    result.save(output_path)
+    result.save(config.output_path / f'{image_path.stem}_freigestellt.png')
     print(f'{image_path.name}: {image.shape[1]}×{image.shape[0]} → '
           f'{crop.shape[1]}×{crop.shape[0]} Pixel; {output_path}')
     if show_preview:
@@ -233,7 +232,7 @@ def main(config: Config | None = None) -> None:
             process_image(
                 image_path,
                 config,
-                show_preview=(index == 0)
+                show_preview=(config.show_preview and index == 0)
             )
             erfolgreich += 1
 
